@@ -164,14 +164,15 @@ class test_redis_prefetched_reconnect:
 
         # Two tasks occupy the pool while the third is prefetched and remains
         # unacknowledged in the worker.
-        group(long_running_task.s(8) for _ in range(3)).apply_async(queue=queue)
+        group(long_running_task.s(20) for _ in range(3)).apply_async(queue=queue)
         _wait_for_log_count(celery_setup.worker, "Starting long running task", 2)
 
         reserved = celery_setup.app.control.inspect(timeout=RESULT_TIMEOUT).reserved() or {}
         assert sum(len(tasks) for tasks in reserved.values()) >= 1
 
-        celery_setup.broker.kill()
-        celery_setup.worker.wait_for_log("Trying again in 8.00 seconds... (4/100)")
+        # Restart Redis in place. Keeping the outage short matters here: the
+        # second close runs while Redis is coming back, which exercises the
+        # partially collected transport state from #11054.
         celery_setup.broker.restart()
 
         # A cleanup failure must not terminate the worker before it reconnects.
