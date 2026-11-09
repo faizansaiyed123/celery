@@ -484,7 +484,13 @@ class Consumer:
         # stay open for in-flight task acks.
         connection, self.connection = self.connection, None
         if connection:
-            ignore_errors(connection, connection.close)
+            try:
+                ignore_errors(connection, connection.close)
+            except Exception as exc:  # pylint: disable=broad-except
+                # collect() may have partially closed the transport, making
+                # a second close fail outside Kombu's connection/channel errors.
+                # Cleanup must not prevent the worker from reconnecting.
+                debug('Error closing connection after broker loss: %r', exc, exc_info=exc)
 
         if self.app.conf.worker_cancel_long_running_tasks_on_connection_loss:
             for request in tuple(active_requests):
