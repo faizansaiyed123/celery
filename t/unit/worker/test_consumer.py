@@ -686,6 +686,20 @@ class test_Consumer(ConsumerTestCase):
         old_conn.close.assert_called_once()
         assert c.connection is None
 
+    def test_close_error_does_not_abort_connection_recovery(self):
+        c = self.get_consumer()
+        old_conn = c.connection
+        old_conn.connection_errors = (OSError,)
+        old_conn.channel_errors = (ChannelError,)
+        old_conn.close.side_effect = AttributeError(
+            "'NoneType' object has no attribute 'hostname'"
+        )
+
+        c.on_connection_error_after_connected(Mock())
+
+        old_conn.close.assert_called_once()
+        assert c.connection is None
+
     def test_connection_error_traceback_is_logged_at_debug_level(self, caplog):
         c = self.get_consumer()
         exc = ConnectionError('broker went away')

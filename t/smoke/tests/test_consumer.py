@@ -1,5 +1,6 @@
 import pytest
 from pytest_celery import RESULT_TIMEOUT, CeleryTestSetup, RedisTestBroker
+from pytest_docker_tools.wrappers.container import wait_for_callable
 
 from celery import Celery
 from celery.canvas import chain, group
@@ -9,6 +10,15 @@ WORKER_PREFETCH_MULTIPLIER = 2
 WORKER_CONCURRENCY = 5
 MAX_PREFETCH = WORKER_PREFETCH_MULTIPLIER * WORKER_CONCURRENCY
 PREFETCH_REDUCTION_SKIPPED_MESSAGE = "Skipping prefetch count reduction after connection restart"
+
+
+def _wait_for_log_count(worker, log: str, count: int, timeout: int = RESULT_TIMEOUT) -> None:
+    """Wait until a worker log message appears at least count times."""
+    wait_for_callable(
+        message=f"Waiting for worker to log '{log}' at least {count} times",
+        func=lambda: worker.logs().count(log) >= count,
+        timeout=timeout,
+    )
 
 
 def uses_global_qos(celery_setup: CeleryTestSetup) -> bool:
@@ -132,6 +142,41 @@ class test_worker_enable_prefetch_count_reduction_false:
         assert "Task t.smoke.tasks.noop" not in celery_setup.worker.logs()
         r.get(timeout=RESULT_TIMEOUT)
         assert "Task t.smoke.tasks.noop" in celery_setup.worker.logs()
+
+
+class test_redis_prefetched_reconnect:
+    @pytest.fixture
+    def default_worker_app(self, default_worker_app: Celery) -> Celery:
+        app = default_worker_app
+        app.conf.worker_concurrency = 2
+        app.conf.worker_prefetch_multiplier = 2
+        return app
+
+    def test_worker_survives_redis_restart_with_prefetched_task(
+        self,
+        celery_setup: CeleryTestSetup,
+    ):
+        if not isinstance(celery_setup.broker, RedisTestBroker):
+            pytest.skip("This regression requires the Redis broker")
+
+        queue = celery_setup.worker.worker_queue
+        assert noop.s().apply_async(queue=queue).get(timeout=RESULT_TIMEOUT) is None
+
+        # Two tasks occupy the pool while the third is prefetched and remains
+        # unacknowledged in the worker.
+        group(long_running_task.s(20) for _ in range(3)).apply_async(queue=queue)
+        _wait_for_log_count(celery_setup.worker, "Starting long running task", 2)
+
+        reserved = celery_setup.app.control.inspect(timeout=RESULT_TIMEOUT).reserved() or {}
+        assert sum(len(tasks) for tasks in reserved.values()) >= 1
+
+        # Restart Redis in place. Keeping the outage short matters here: the
+        # second close runs while Redis is coming back, which exercises the
+        # partially collected transport state from #11054.
+        celery_setup.broker.restart()
+
+        # A cleanup failure must not terminate the worker before it reconnects.
+        assert noop.s().apply_async(queue=queue).get(timeout=RESULT_TIMEOUT) is None
 
 
 class test_consumer:
